@@ -15,7 +15,6 @@ limitations under the License.
 """
 
 
-
 # Standard Library
 from dataclasses import dataclass
 from typing import List, Optional, Set, Union
@@ -229,9 +228,14 @@ class Panda3dBatchRenderer:
         if render_mask:
             raise NotImplementedError
 
+        # print("labels", labels)
+        # scene data contans transform information
         scene_datas = self.make_scene_data(labels, TCO, K, light_datas, resolution)
         bsz = len(scene_datas)
 
+        print("scene_datas\n", scene_datas, "\n----\n")
+
+        print("self._object_label_to_queue", self._object_label_to_queue)
         for n, scene_data_n in enumerate(scene_datas):
             render_args = RenderArguments(
                 data_id=n,
@@ -250,13 +254,15 @@ class Panda3dBatchRenderer:
         for n in np.arange(bsz):
             renders = self._out_queue.get()
             data_id = renders.data_id
+            # this is where the output is generated. Need to figure out which function is called
             list_rgbs[data_id] = renders.rgb
             if render_depth:
                 list_depths[data_id] = renders.depth
             if render_normals:
                 list_normals[data_id] = renders.normals
             del renders
-
+        # output is already generated at this point
+        print("list_rgbs\n", list_rgbs)
         assert list_rgbs[0] is not None
         rgbs = torch.stack(list_rgbs).pin_memory().cuda(non_blocking=True)
         rgbs = rgbs.float().permute(0, 3, 1, 2) / 255

@@ -15,7 +15,6 @@ limitations under the License.
 """
 
 
-
 # Standard Library
 from typing import Tuple, Union
 
@@ -25,7 +24,7 @@ import numpy as np
 import pinocchio as pin
 import torch
 
-eigenpy.switchToNumpyArray()
+# eigenpy.switchToNumpyArray()
 
 
 class Transform:
