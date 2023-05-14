@@ -110,7 +110,7 @@ def load_pose_models(
 
         renderer_kwargs_.setdefault("split_objects", True)
         renderer_kwargs_.setdefault("preload_cache", False)
-        renderer_kwargs_.setdefault("n_workers", 4)
+        renderer_kwargs_.setdefault("n_workers", 1)
 
         if renderer_type == "panda3d" or force_panda3d_renderer:
             renderer = Panda3dBatchRenderer(object_dataset=object_dataset, **renderer_kwargs_)

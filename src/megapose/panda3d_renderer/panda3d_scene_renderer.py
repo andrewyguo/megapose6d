@@ -15,7 +15,6 @@ limitations under the License.
 """
 
 
-
 # Standard Library
 import builtins
 import os
@@ -23,12 +22,12 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from typing import Dict, List, Set
 from dataclasses import dataclass
 from functools import partial
 from typing import Dict, List, Optional, Set
 
 # Third Party
+import cv2
 import numpy as np
 import panda3d as p3d
 from direct.showbase.ShowBase import ShowBase
@@ -36,6 +35,7 @@ from tqdm import tqdm
 
 # MegaPose
 from megapose.datasets.object_dataset import RigidObjectDataset
+from megapose.utils.resources import get_cuda_memory, get_gpu_memory, get_total_memory
 
 # Local Folder
 from .types import (
@@ -48,6 +48,14 @@ from .types import (
     RgbaColor,
 )
 from .utils import make_rgb_texture_normal_map, np_to_lmatrix4
+
+# ngp 
+import sys 
+sys.path.append("/instant-ngp/build")
+import pyngp as ngp  # noqa
+import cv2 
+import os 
+import imageio 
 
 
 @dataclass
@@ -99,6 +107,32 @@ class App(ShowBase):
         self.render.set_shader_auto()
         self.render.set_antialias(p3d.core.AntialiasAttrib.MAuto)
         self.render.set_two_sided(True)
+
+        self.testbed = None  
+        self.setup_testbed()
+
+    def setup_testbed(self):
+        print("setup_testbed in App()")
+        self.testbed = ngp.Testbed()
+        # self.testbed.init_window(320, 240) # hardcoded for now, change later 
+        self.testbed.load_snapshot("/megapose/data/ngp_sample/snapshot.msgpack")
+
+        # self.testbed.exposure = ...
+        self.testbed.background_color = [0.0, 0.0, 0.0, 1.0]
+
+        self.testbed.fov_axis = 0
+        self.testbed.shall_train = False 
+        self.testbed.exposure = 0.0
+        self.testbed.nerf.sharpen = float(0)
+        self.testbed.nerf.render_with_lens_distortion = True
+        self.testbed.fov_axis = 0
+        self.testbed.fov = 1.0819319066613973 * 180 / np.pi
+        
+        # image = self.testbed.render(320, 240, 16, True) 
+        # save_img("/megapose/data/test_out/sample_img_4.png", image)
+
+        cam_matrix = [[-0.9840850629933995, 0.14819060759522407, 0.09806837745696383, 0.3464513998905527], [0.16003007960050153, 0.49913099674777456, 0.8516217474929667, 2.6047688614067375], [0.07725389308124825, 0.8537618443054136, -0.5149014930903566, -1.7294496578064604], [0.0, 0.0, 0.0, 1.0]]
+        self.testbed.set_nerf_camera_matrix(np.matrix(cam_matrix)[:-1,:])
 
 
 def make_scene_lights(
@@ -226,6 +260,8 @@ class Panda3dSceneRenderer:
             if data_obj.remove_mesh_material:
                 obj_node.setMaterialOff(1)
             TWO = np_to_lmatrix4(data_obj.TWO.toHomogeneousMatrix())
+            # print("data_obj", data_obj)
+            # print("TWO", TWO)
             obj_node.setMat(TWO)
             if data_obj.positioning_function is not None:
                 data_obj.positioning_function(root_node, obj_node)
@@ -247,6 +283,8 @@ class Panda3dSceneRenderer:
 
             data_camera.set_lens_parameters(camera_node_path.node().getLens())
             view_mat = data_camera.compute_view_mat()
+            print("view_mat", view_mat)
+            # print("data_camera", data_camera)
             camera_node_path.setMat(view_mat)
             if data_camera.positioning_function is not None:
                 data_camera.positioning_function(root_node, camera_node_path)
@@ -262,6 +300,12 @@ class Panda3dSceneRenderer:
         renderings = []
         for camera in cameras:
             rgb = camera.get_rgb_image()
+            i = 0
+            # use cv2 to show rgb image
+            # while os.path.exists(f"/megapose/data/test_out/rgb_{str(i).zfill(3)}.png"):
+            #     i += 1
+            # cv2.imwrite(f"/megapose/data/test_out/rgb_{str(i).zfill(3)}.png", rgb)
+            # i += 1
             if copy_arrays:
                 rgb = rgb.copy()
             rendering = CameraRenderingData(rgb)
@@ -305,54 +349,106 @@ class Panda3dSceneRenderer:
         render_binary_mask: bool = False,
         render_normals: bool = False,
         clear: bool = True,
+        testbed=None,
     ) -> List[CameraRenderingData]:
 
         start = time.time()
-        root_node = self._app.render.attachNewNode("world")
-        object_nodes = self.setup_scene(root_node, object_datas)
-        cameras = self.setup_cameras(root_node, camera_datas)
-        light_nodes = self.setup_lights(root_node, light_datas)
-        setup_time = time.time() - start
+        if self._app.testbed is None:
+            root_node = self._app.render.attachNewNode("world")
+            object_nodes = self.setup_scene(root_node, object_datas)
+            cameras = self.setup_cameras(root_node, camera_datas)
+            light_nodes = self.setup_lights(root_node, light_datas)
+            setup_time = time.time() - start
 
-        start = time.time()
-        renderings = self.render_images(cameras, copy_arrays=copy_arrays, render_depth=render_depth)
-        if render_normals:
-            for object_node in object_nodes:
-                self.use_normals_texture(object_node)
+            start = time.time()
+            renderings = self.render_images(cameras, copy_arrays=copy_arrays, render_depth=render_depth)
+            if render_normals:
+                for object_node in object_nodes:
+                    self.use_normals_texture(object_node)
+                    root_node.clear_light()
+                    light_data = Panda3dLightData(light_type="ambient", color=(1.0, 1.0, 1.0, 1.0))
+                    light_nodes += self.setup_lights(root_node, [light_data])
+                normals_renderings = self.render_images(cameras, copy_arrays=copy_arrays)
+                for n, rendering in enumerate(renderings):
+                    rendering.normals = normals_renderings[n].rgb
+
+            if render_binary_mask:
+                for rendering_n in renderings:
+                    assert rendering_n.depth is not None
+                    h, w = rendering_n.depth.shape[:2]
+                    binary_mask = np.zeros((h, w), dtype=np.bool_)
+                    binary_mask[rendering_n.depth[..., 0] > 0] = 1
+                    rendering.binary_mask = binary_mask
+
+            render_time = time.time() - start
+
+            if clear:
+                for camera in cameras:
+                    camera.node_path.node().setActive(0)
+                for object_node in object_nodes:
+                    object_node.clear_texture()  # TODO: Is this necessary ?
+                    object_node.clear_light()  # TODO: Is this necessary ?
+                    object_node.detach_node()
+                for light_node in light_nodes:
+                    light_node.detach_node()
                 root_node.clear_light()
-                light_data = Panda3dLightData(light_type="ambient", color=(1.0, 1.0, 1.0, 1.0))
-                light_nodes += self.setup_lights(root_node, [light_data])
-            normals_renderings = self.render_images(cameras, copy_arrays=copy_arrays)
-            for n, rendering in enumerate(renderings):
-                rendering.normals = normals_renderings[n].rgb
+                root_node.detach_node()
 
-        if render_binary_mask:
-            for rendering_n in renderings:
-                assert rendering_n.depth is not None
-                h, w = rendering_n.depth.shape[:2]
-                binary_mask = np.zeros((h, w), dtype=np.bool_)
-                binary_mask[rendering_n.depth[..., 0] > 0] = 1
-                rendering.binary_mask = binary_mask
+                for _ in range(3):
+                    # TODO: Is this necessary ?
+                    p3d.core.RenderState.garbageCollect()
+                    p3d.core.TransformState.garbageCollect()
+        else: 
+            print("Using NGP Renderer")
+            renderings = []
+            setup_time = time.time() - start
 
-        render_time = time.time() - start
+            for camera_data in camera_datas:
+                transform = camera_data.compute_view_mat()
+                print("original_transform", transform)
+                transform = np.matrix(transform)[:,:-1]
+                print("np.matrix(transform)[:-1,:]", transform)
+                print("transform.shape", transform.shape)
+                transform.transpose()
+                print("transform,", transform)
+                self._app.testbed.set_nerf_camera_matrix(transform)
+                
+                start = time.time()
+                self._app.testbed.render_mode = ngp.RenderMode.Shade 
+                rgb = self._app.testbed.render(320, 240, 16, True)
 
-        if clear:
-            for camera in cameras:
-                camera.node_path.node().setActive(0)
-            for object_node in object_nodes:
-                object_node.clear_texture()  # TODO: Is this necessary ?
-                object_node.clear_light()  # TODO: Is this necessary ?
-                object_node.detach_node()
-            for light_node in light_nodes:
-                light_node.detach_node()
-            root_node.clear_light()
-            root_node.detach_node()
+                render_time = time.time() - start
+                render = CameraRenderingData(self.post_process_ngp_render(rgb)) 
 
-            for _ in range(3):
-                # TODO: Is this necessary ?
-                p3d.core.RenderState.garbageCollect()
-                p3d.core.TransformState.garbageCollect()
+                if render_normals:
+                    self._app.testbed.render_mode = ngp.RenderMode.Normals 
+                    normals = self._app.testbed.render(320, 240, 16, True)   
+                    
+                    render.normals = self.post_process_ngp_render(normals)
+
+                renderings.append(render)
+
+                i = 0
+                # use cv2 to show rgb image
+                while os.path.exists(f"/megapose/data/test_out/ngp_rgb_{str(i).zfill(3)}.png"):
+                    i += 1
+                cv2.imwrite(f"/megapose/data/test_out/ngp_rgb_{str(i).zfill(3)}.png", self.post_process_ngp_render(rgb))
 
         self.debug_data.timings["setup_time"] = setup_time
         self.debug_data.timings["render_time"] = render_time
         return renderings
+
+    def post_process_ngp_render(self, ngp_render):
+        def linear_to_srgb(img):
+            limit = 0.0031308
+            return np.where(img > limit, 1.055 * (img ** (1.0 / 2.4)) - 0.055, 12.92 * img)
+        
+        ngp_render = np.copy(ngp_render)
+        ngp_render[...,0:3] = np.divide(ngp_render[...,0:3], ngp_render[...,3:4], out=np.zeros_like(ngp_render[...,0:3]), where=ngp_render[...,3:4] != 0)
+        ngp_render[...,0:3] = linear_to_srgb(ngp_render[...,0:3])
+
+        ngp_render = (np.clip(ngp_render, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+        ngp_render = cv2.cvtColor(ngp_render, cv2.COLOR_RGBA2RGB)
+
+        return ngp_render

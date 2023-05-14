@@ -10,6 +10,7 @@ import numpy as np
 from bokeh.io import export_png
 from bokeh.plotting import gridplot
 from PIL import Image
+import torch 
 
 # MegaPose
 from megapose.datasets.object_dataset import RigidObject, RigidObjectDataset
@@ -218,6 +219,8 @@ if __name__ == "__main__":
     data_dir = os.getenv("MEGAPOSE_DATA_DIR")
     assert data_dir
     example_dir = Path(data_dir) / "examples" / args.example_name
+
+    torch.multiprocessing.set_start_method("spawn")
 
     if args.vis_detections:
         make_detections_visualization(example_dir)

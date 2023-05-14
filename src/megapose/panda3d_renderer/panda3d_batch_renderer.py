@@ -40,6 +40,14 @@ from .types import (
     Resolution,
 )
 
+# ngp 
+import sys 
+sys.path.append("/instant-ngp/build")
+import pyngp as ngp  # noqa
+import cv2 
+import os 
+import imageio 
+
 logger = get_logger(__name__)
 
 
@@ -91,6 +99,7 @@ def worker_loop(
     out_queue: torch.multiprocessing.Queue,
     object_dataset: RigidObjectDataset,
     preload_labels: Set[str] = set(),
+    testbed=None,
 ) -> None:
 
     logger.debug(f"Init worker: {worker_id}")
@@ -123,6 +132,7 @@ def worker_loop(
                 render_normals=render_args.render_normals,
                 render_depth=render_args.render_depth,
                 copy_arrays=True,  # ensures non-negative strid
+                testbed=testbed,
             )
             renderings_ = renderings[0]
         else:
@@ -153,18 +163,20 @@ class Panda3dBatchRenderer:
     def __init__(
         self,
         object_dataset: RigidObjectDataset,
-        n_workers: int = 8,
+        n_workers: int = 2,
         preload_cache: bool = True,
         split_objects: bool = False,
     ):
 
         assert n_workers >= 1
         self._object_dataset = object_dataset
-        self._n_workers = n_workers
+        self._n_workers = 1 # n_workers
         self._split_objects = split_objects
 
         self._init_renderers(preload_cache)
         self._is_closed = False
+
+        print("self._n_workers", self._n_workers)
 
     def make_scene_data(
         self,
@@ -233,7 +245,7 @@ class Panda3dBatchRenderer:
         scene_datas = self.make_scene_data(labels, TCO, K, light_datas, resolution)
         bsz = len(scene_datas)
 
-        print("scene_datas\n", scene_datas, "\n----\n")
+        print("scene_datas[0]\n", scene_datas[0], "\n----\n")
 
         print("self._object_label_to_queue", self._object_label_to_queue)
         for n, scene_data_n in enumerate(scene_datas):
@@ -262,7 +274,9 @@ class Panda3dBatchRenderer:
                 list_normals[data_id] = renders.normals
             del renders
         # output is already generated at this point
-        print("list_rgbs\n", list_rgbs)
+        print("list_rgbs\n", len(list_rgbs))
+        print("list_rgb[0]\n", list_rgbs[0], list_rgbs[0].shape)    
+
         assert list_rgbs[0] is not None
         rgbs = torch.stack(list_rgbs).pin_memory().cuda(non_blocking=True)
         rgbs = rgbs.float().permute(0, 3, 1, 2) / 255
@@ -288,6 +302,11 @@ class Panda3dBatchRenderer:
         )
 
     def _init_renderers(self, preload_cache: bool) -> None:
+
+        # self.testbed = ngp.Testbed()
+        # print("self.testbed is", self.testbed)
+        # self.setup_testbed() 
+
         object_labels = [obj.label for obj in self._object_dataset.list_objects]
 
         self._renderers: List[torch.multiprocessing.Process] = []
@@ -322,6 +341,7 @@ class Panda3dBatchRenderer:
                     out_queue=self._out_queue,
                     object_dataset=self._object_dataset,
                     preload_labels=preload_labels,
+                    # testbed=self.testbed,
                 ),
             )
             renderer_process.start()
@@ -344,3 +364,54 @@ class Panda3dBatchRenderer:
 
     def __del__(self) -> None:
         self.stop()
+
+    def setup_testbed(self):
+        # self.testbed.init_window(320, 240) # hardcoded for now, change later 
+        self.testbed.load_snapshot("/megapose/data/ngp_sample/snapshot.msgpack")
+
+        # self.testbed.exposure = ...
+        self.testbed.background_color = [0.0, 0.0, 0.0, 1.0]
+
+        self.testbed.fov_axis = 0
+        self.testbed.shall_train = False 
+        self.testbed.exposure = 0.0
+        self.testbed.nerf.sharpen = float(0)
+        self.testbed.nerf.render_with_lens_distortion = True
+        self.testbed.fov_axis = 0
+        self.testbed.fov = 1.0819319066613973 * 180 / np.pi
+        
+        image = self.testbed.render(320, 240, 16, True) 
+        save_img("/megapose/data/test_out/sample_img_4.png", image)
+
+        cam_matrix = [[-0.9840850629933995, 0.14819060759522407, 0.09806837745696383, 0.3464513998905527], [0.16003007960050153, 0.49913099674777456, 0.8516217474929667, 2.6047688614067375], [0.07725389308124825, 0.8537618443054136, -0.5149014930903566, -1.7294496578064604], [0.0, 0.0, 0.0, 1.0]]
+        self.testbed.set_nerf_camera_matrix(np.matrix(cam_matrix)[:-1,:])
+
+        image = self.testbed.render(320, 240, 16, True) 
+        save_img("/megapose/data/test_out/sample_img_3.png", image)
+        # Test Call 
+        # sample_img = self.testbed.render(320, 240, 8, True) 
+
+        # cv2.imwrite("/megapose/data/test_out/sample_img.png", sample_img)
+
+
+def save_img(file_path, image):
+    image = np.copy(image)
+    # Unmultiply alpha
+    image[...,0:3] = np.divide(image[...,0:3], image[...,3:4], out=np.zeros_like(image[...,0:3]), where=image[...,3:4] != 0)
+    image[...,0:3] = linear_to_srgb(image[...,0:3])
+
+    write_image_imageio(file_path, image, 100)
+
+def linear_to_srgb(img):
+	limit = 0.0031308
+	return np.where(img > limit, 1.055 * (img ** (1.0 / 2.4)) - 0.055, 12.92 * img)
+
+def write_image_imageio(img_file, img, quality):
+	img = (np.clip(img, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+	kwargs = {}
+	if os.path.splitext(img_file)[1].lower() in [".jpg", ".jpeg"]:
+		if img.ndim >= 3 and img.shape[2] > 3:
+			img = img[:,:,:3]
+		kwargs["quality"] = quality
+		kwargs["subsampling"] = 0
+	imageio.imwrite(img_file, img, **kwargs)

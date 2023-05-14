@@ -47,8 +47,8 @@ def get_total_memory():
     return mem / (1024**3)
 
 
-def get_cuda_memory():
-    return torch.cuda.max_memory_allocated() / (1024.0**3)
+def get_cuda_memory(): # print this somewhere 
+    return torch.cuda.max_memory_allocated(0) / (1024.0**3)
 
 
 def get_gpu_memory():
