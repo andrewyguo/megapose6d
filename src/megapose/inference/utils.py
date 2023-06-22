@@ -84,6 +84,7 @@ def load_pose_models(
     force_panda3d_renderer: bool = False,
     renderer_kwargs: Optional[dict] = None,
     models_root: Path = EXP_DIR,
+    use_ngp_renderer: bool = True, 
 ) -> Tuple[torch.nn.Module, torch.nn.Module, megapose.lib3d.rigid_mesh_database.BatchedMeshes]:
 
     coarse_run_dir = models_root / coarse_run_id
@@ -111,6 +112,7 @@ def load_pose_models(
         renderer_kwargs_.setdefault("split_objects", True)
         renderer_kwargs_.setdefault("preload_cache", False)
         renderer_kwargs_.setdefault("n_workers", 1)
+        renderer_kwargs_.__setitem__("use_ngp_renderer", use_ngp_renderer)
 
         if renderer_type == "panda3d" or force_panda3d_renderer:
             renderer = Panda3dBatchRenderer(object_dataset=object_dataset, **renderer_kwargs_)

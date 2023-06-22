@@ -43,7 +43,6 @@ from .types import (
 # ngp 
 import sys 
 sys.path.append("/instant-ngp/build")
-import pyngp as ngp  # noqa
 import cv2 
 import os 
 import imageio 
@@ -99,13 +98,14 @@ def worker_loop(
     out_queue: torch.multiprocessing.Queue,
     object_dataset: RigidObjectDataset,
     preload_labels: Set[str] = set(),
-    testbed=None,
+    use_ngp_renderer: bool = True,
 ) -> None:
 
     logger.debug(f"Init worker: {worker_id}")
     renderer = Panda3dSceneRenderer(
         asset_dataset=object_dataset,
         preload_labels=preload_labels,
+        use_ngp_renderer=use_ngp_renderer,
     )
 
     while True:
@@ -132,7 +132,6 @@ def worker_loop(
                 render_normals=render_args.render_normals,
                 render_depth=render_args.render_depth,
                 copy_arrays=True,  # ensures non-negative strid
-                testbed=testbed,
             )
             renderings_ = renderings[0]
         else:
@@ -166,14 +165,15 @@ class Panda3dBatchRenderer:
         n_workers: int = 2,
         preload_cache: bool = True,
         split_objects: bool = False,
+        use_ngp_renderer: bool = True,
     ):
 
         assert n_workers >= 1
         self._object_dataset = object_dataset
-        self._n_workers = 1 # n_workers
+        self._n_workers = 4 # 8 # n_workers
         self._split_objects = split_objects
 
-        self._init_renderers(preload_cache)
+        self._init_renderers(preload_cache, use_ngp_renderer=use_ngp_renderer)
         self._is_closed = False
 
         print("self._n_workers", self._n_workers)
@@ -204,15 +204,17 @@ class Panda3dBatchRenderer:
 
         TCO = TCO.detach()
         TOC = invert_transform_matrices(TCO).cpu().numpy().astype(np.float32)
+        TCO_np = TCO.cpu().numpy().astype(np.float32)
         K = K.cpu().numpy()
         TWO = Transform((0.0, 0.0, 0.0, 1.0), (0.0, 0.0, 0.0))
         scene_datas = []
-        for label_n, TOC_n, K_n, lights_n in zip(labels, TOC, K, light_datas):
+        for label_n, TOC_n, K_n, lights_n, TCO_n in zip(labels, TOC, K, light_datas, TCO_np):
             scene_data = SceneData(
                 camera_data=Panda3dCameraData(
                     TWC=Transform(TOC_n),
                     K=K_n,
                     resolution=resolution,
+                    TCO=TCO_n,
                 ),
                 object_datas=[
                     Panda3dObjectData(
@@ -274,8 +276,8 @@ class Panda3dBatchRenderer:
                 list_normals[data_id] = renders.normals
             del renders
         # output is already generated at this point
-        print("list_rgbs\n", len(list_rgbs))
-        print("list_rgb[0]\n", list_rgbs[0], list_rgbs[0].shape)    
+        # print("list_rgbs\n", len(list_rgbs))
+        # print("list_rgb[0]\n", list_rgbs[0], list_rgbs[0].shape)    
 
         assert list_rgbs[0] is not None
         rgbs = torch.stack(list_rgbs).pin_memory().cuda(non_blocking=True)
@@ -301,7 +303,7 @@ class Panda3dBatchRenderer:
             normals=normals,
         )
 
-    def _init_renderers(self, preload_cache: bool) -> None:
+    def _init_renderers(self, preload_cache: bool, use_ngp_renderer: bool=True) -> None:
 
         # self.testbed = ngp.Testbed()
         # print("self.testbed is", self.testbed)
@@ -341,6 +343,7 @@ class Panda3dBatchRenderer:
                     out_queue=self._out_queue,
                     object_dataset=self._object_dataset,
                     preload_labels=preload_labels,
+                    use_ngp_renderer=use_ngp_renderer,
                     # testbed=self.testbed,
                 ),
             )
@@ -378,16 +381,16 @@ class Panda3dBatchRenderer:
         self.testbed.nerf.sharpen = float(0)
         self.testbed.nerf.render_with_lens_distortion = True
         self.testbed.fov_axis = 0
-        self.testbed.fov = 1.0819319066613973 * 180 / np.pi
+        self.testbed.fov = 1.0819319066613973 * 180 / np.pi # need to see if this needs tobe changed depending on resolution 
         
-        image = self.testbed.render(320, 240, 16, True) 
-        save_img("/megapose/data/test_out/sample_img_4.png", image)
+        # image = self.testbed.render(320, 240, 16, True) 
+        # save_img("/megapose/data/test_out/sample_img_4.png", image)
 
-        cam_matrix = [[-0.9840850629933995, 0.14819060759522407, 0.09806837745696383, 0.3464513998905527], [0.16003007960050153, 0.49913099674777456, 0.8516217474929667, 2.6047688614067375], [0.07725389308124825, 0.8537618443054136, -0.5149014930903566, -1.7294496578064604], [0.0, 0.0, 0.0, 1.0]]
-        self.testbed.set_nerf_camera_matrix(np.matrix(cam_matrix)[:-1,:])
+        # cam_matrix = [[-0.9840850629933995, 0.14819060759522407, 0.09806837745696383, 0.3464513998905527], [0.16003007960050153, 0.49913099674777456, 0.8516217474929667, 2.6047688614067375], [0.07725389308124825, 0.8537618443054136, -0.5149014930903566, -1.7294496578064604], [0.0, 0.0, 0.0, 1.0]]
+        # self.testbed.set_nerf_camera_matrix(np.matrix(cam_matrix)[:-1,:])
 
-        image = self.testbed.render(320, 240, 16, True) 
-        save_img("/megapose/data/test_out/sample_img_3.png", image)
+        # image = self.testbed.render(320, 240, 16, True) 
+        # save_img("/megapose/data/test_out/sample_img_3.png", image)
         # Test Call 
         # sample_img = self.testbed.render(320, 240, 8, True) 
 

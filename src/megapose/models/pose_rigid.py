@@ -24,6 +24,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 # Third Party
 import numpy as np
 import torch
+import cv2 
+import os 
+from PIL import Image, ImageDraw 
 from torch import nn
 
 # MegaPose
@@ -43,6 +46,8 @@ from megapose.panda3d_renderer.panda3d_batch_renderer import Panda3dBatchRendere
 from megapose.panda3d_renderer.panda3d_scene_renderer import make_scene_lights
 from megapose.training.utils import CudaTimer
 from megapose.utils.logging import get_logger
+
+from megapose.scripts.compute_deltas import interpolate_translation 
 
 logger = get_logger(__name__)
 
@@ -320,6 +325,7 @@ class PosePredictor(nn.Module):
         Returns:
             Dict[str, torch.Tensor]: Output of each network head.
         """
+        print("call net_forward")
         x = self.backbone(x)
         if x.dim() == 2:
             pass
@@ -505,6 +511,7 @@ class PosePredictor(nn.Module):
         random_ambient_light: bool = False,
     ) -> Dict[str, PosePredictorOutput]:
 
+        print("calling forward inside pose_rigid.py")
         timing_dict: Dict[str, float] = defaultdict(float)
 
         if not self.input_depth:
@@ -537,6 +544,9 @@ class PosePredictor(nn.Module):
             )
             TCV_O_input_flatten = TCV_O_input.flatten(0, 1)
 
+            print("TCV_O_input_flatten.shape", TCV_O_input_flatten.shape)
+            # get sample of TCV_O_input_flatten 
+            print("TCV_O_input_flatten[0]", TCV_O_input_flatten[0])
             n_views = TCV_O_input.shape[1]
             tCV_R = TCV_O_input_flatten[..., :3, [-1]] + TCV_O_input_flatten[
                 ..., :3, :3
@@ -555,6 +565,7 @@ class PosePredictor(nn.Module):
             renders = self.render_images_multiview(
                 labels, TCV_O_input, KV_crop, random_ambient_light=random_ambient_light
             )
+            print("done render_images_multiview()")
             render_time = time.time() - t
             timing_dict["render"] = render_time
 
@@ -600,7 +611,9 @@ class PosePredictor(nn.Module):
             )
             if self.debug:
                 self.debug_data.output = outputs[f"iteration={n+1}"]
-            TCO_input = TCO_output
+
+            # import IPython; IPython.embed()
+            TCO_input = interpolate_translation(TCO_input, TCO_output, 0.5)
         return outputs
 
     def forward_coarse_tensor(
@@ -681,9 +694,23 @@ class PosePredictor(nn.Module):
             images, K, TCO_input, tCR, labels
         )
 
+        print("tCR.shape", tCR.shape)
+
         # [B,1,4,4], hack to use the multi-view function
         TCO_V_input = TCO_input.unsqueeze(1)
         KV_crop = K_crop.unsqueeze(1)
+
+        # print("TCO_V_input.shape", TCO_V_input.shape)
+        # print("sample TCV_O_input", TCO_V_input[0])
+
+        # print("images_crop.shape", images_crop.shape)
+
+        # sample_image_crop = images_crop[0].permute(1, 2, 0).cpu().numpy()
+        # sample_image_crop *= 255.0 
+        # sample_image_crop = cv2.cvtColor(sample_image_crop, cv2.COLOR_RGB2BGR)
+        # cv2.imwrite("sample_image_crop.png", sample_image_crop)
+
+        # print("KV_crop.shape", KV_crop.shape)
 
         render_start = time.time()
         renders = self.render_images_multiview(
@@ -691,6 +718,8 @@ class PosePredictor(nn.Module):
             TCO_V_input,
             KV_crop,
         )
+
+
         render_time = time.time() - render_start
 
         images_crop, renders = self.normalize_images(images_crop, renders, tCR)
@@ -698,11 +727,85 @@ class PosePredictor(nn.Module):
 
         out = self.forward_coarse_tensor(x, cuda_timer=cuda_timer)
 
+        # print("out['scores'].shape", out["scores"].shape)
+        # print("out['scores']", out["scores"])
+
         out["render_time"] = render_time
         out["model_time"] = out["time"]
+
+        scores_array = out["scores"].cpu().numpy()
+
+        # for i, score in enumerate(scores_array):
+        #     images_crop_i = images_crop[i].permute(1, 2, 0).cpu().numpy()
+        #     images_crop_i *= 255.0  
+        #     images_crop_i = images_crop_i.astype(np.uint8)
+
+        #     im = Image.fromarray(images_crop_i)
+        #     draw = ImageDraw.Draw(im)
+        #     draw.text((0, 0), str(score), (255, 0, 0))
+
+        #     im.save(f"image_scores/{str(i).zfill(6)}_images_crop.png")
+
+        #     renders_i = renders[i, :3, :, :].permute(1, 2, 0).cpu().numpy()
+        #     renders_i *= 255.0
+        #     renders_i = renders_i.astype(np.uint8)
+
+        #     r_im = Image.fromarray(renders_i)
+        #     r_draw = ImageDraw.Draw(r_im)
+        #     r_draw.text((0, 0), str(score), (255, 0, 0))    
+
+        #     r_im.save(f"image_scores/{str(i).zfill(6)}_renders.png")
+
+        # max_score_idx = np.argmax(scores_array)
+
+        # print("max_score_idx", max_score_idx, "max score:", scores_array[max_score_idx])
+        # print("scores_array", scores_array)
+        top_5_score_idx = sorted(range(len(scores_array)), key=lambda i: scores_array[i])[-5:]
+
+        print("top_5_score_idx", top_5_score_idx)
+        print("top_5_scores", scores_array[top_5_score_idx])
+
+        os.makedirs("image_scores", exist_ok=True)
+        for i in top_5_score_idx:
+            images_crop_i = images_crop[i].permute(1, 2, 0).cpu().numpy()
+            images_crop_i *= 255.0  
+            images_crop_i = images_crop_i.astype(np.uint8)
+
+            im = Image.fromarray(images_crop_i)
+            draw = ImageDraw.Draw(im)
+            draw.text((0, 0), str(scores_array[i]), (255, 0, 0))
+
+            im.save(f"image_scores/images_crop.png")
+
+            renders_i = renders[i, :3, :, :].permute(1, 2, 0).cpu().numpy()
+            renders_i *= 255.0
+            renders_i = renders_i.astype(np.uint8)
+
+            r_im = Image.fromarray(renders_i)
+            r_draw = ImageDraw.Draw(r_im)
+            r_draw.text((0, 0), str(scores_array[i]), (255, 0, 0))    
+
+            r_im.save(f"image_scores/{str(i).zfill(6)}_renders.png")
+
+        
+        # print("renders.shape", renders.shape)
+        # print("renders_max.shape", renders[max_score_idx, :3, :, :].shape)
+
+
+        # images_crop_max = images_crop[max_score_idx].permute(1, 2, 0).cpu().numpy()
+        # images_crop_max *= 255.0
+        # images_crop_max = cv2.cvtColor(images_crop_max, cv2.COLOR_RGB2BGR)
+        # cv2.imwrite("images_crop_max.png", images_crop_max)
+        
+        # renders_max = renders[max_score_idx, :3, :, :].permute(1, 2, 0).cpu().numpy()
+        # renders_max *= 255.0
+        # renders_max = cv2.cvtColor(renders_max, cv2.COLOR_RGB2BGR)
+        # cv2.imwrite("renders_max.png", renders_max)
 
         if return_debug_data:
             out["images_crop"] = images_crop
             out["renders"] = renders
+
+        # input("Press Enter to continue...")
 
         return out

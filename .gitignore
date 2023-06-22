@@ -24,3 +24,5 @@ tmp/
 local_data
 tests.sh
 data/
+image_scores/
+debug*/

@@ -22,6 +22,9 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
+import pickle 
+import os 
+import cv2 
 
 # Third Party
 import numpy as np
@@ -46,6 +49,7 @@ from megapose.utils.logging import get_logger
 from megapose.utils.tensor_collection import PandasTensorCollection
 from megapose.utils.timer import Timer
 
+from megapose.scripts.compute_deltas import transformation_differences
 logger = get_logger(__name__)
 
 
@@ -163,6 +167,7 @@ class PoseEstimator(torch.nn.Module):
 
             timer_ = CudaTimer(enabled=cuda_timer)
             timer_.start()
+            print("calling self.refiner_model")
             outputs_ = self.refiner_model(
                 images=images_,
                 K=K_,
@@ -171,6 +176,54 @@ class PoseEstimator(torch.nn.Module):
                 labels=labels_,
                 **refiner_kwargs,
             )
+
+            os.makedirs("debug", exist_ok=True)
+            print("outputs_.keys():", outputs_.keys())
+            deltas = defaultdict(dict)
+            images_per_hypothesis = defaultdict(list)
+            for k, v in outputs_.items():
+                output = v 
+                renders = output.renders
+                images_crop = output.images_crop 
+
+                # print("renders.shape:", renders.shape)
+                # print("images_crop.shape:", images_crop.shape)
+
+                # for i, render in enumerate(renders):
+                #     cv2.imwrite(f"debug/batch_{batch_idx}_{k}_debug_render_{i}.png", cv2.cvtColor(render[:3].cpu().numpy().transpose(1,2,0) * 255.0, cv2.COLOR_RGB2BGR))
+                for i, image_crop in enumerate(images_crop):
+                    render = renders[i][:3].cpu().numpy().transpose(1,2,0) * 255.0 
+                    image_crop = image_crop.cpu().numpy().transpose(1,2,0) * 255.0
+                    image_crop[render > 10] = render[render > 10]
+                    image_crop = cv2.cvtColor(image_crop, cv2.COLOR_RGB2BGR)
+                    image_crop = cv2.putText(image_crop, f"{k}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
+                    images_per_hypothesis[i].append(image_crop)
+
+                    # cv2.imwrite(f"debug/{str(i).zfill(3)}_{k}_debug_crop.png", cv2.cvtColor(image_crop, cv2.COLOR_RGB2BGR))
+
+                t_delta, r_delta = transformation_differences(output.TCO_output, output.TCO_input)
+                # print("TCO_output", output.TCO_output)
+                # print("TCO_input", output.TCO_input)
+
+                for i in range(len(images_crop)):
+                    if "translation" not in deltas[i]:
+                        deltas[i]['translation'] = []
+                        deltas[i]['rotation'] = []
+
+                    deltas[i]['translation'].append(t_delta[i])
+                    deltas[i]['rotation'].append(r_delta[i])
+
+                # deltas[k] = (t_delta, r_delta) 
+                print(f"{k}: translational delta: \n", t_delta)
+                print(f"{k}: rotational delta:    \n", r_delta)
+            for i, images in images_per_hypothesis.items():
+                concat = cv2.vconcat(images)
+                cv2.imwrite(f"debug/{str(i).zfill(3)}_debug_crop.png", concat)
+
+
+            for k, v in deltas.items():
+                print(f"delta for {k}:\n", v)
+
             timer_.stop()
             model_time += timer_.elapsed()
 
@@ -335,10 +388,18 @@ class PoseEstimator(torch.nn.Module):
         - Scores them using the coarse model.
         """
 
+        print("inside pose_estimator.py, forward_coarse_model(), observation.images.shape:", observation.images.shape)
         start_time = time.time()
 
+        # print observation.images 
+        observation_img_sample = observation.images[0].cpu().numpy().transpose(1,2,0) * 255.0 
+
+        observation_img_sample = cv2.cvtColor(observation_img_sample, cv2.COLOR_RGB2BGR)
+        print("observation_img_sample.shape:", observation_img_sample.shape)
+        # cv2.imwrite("observation_img_sample.png", observation_img_sample)
         megapose.inference.types.assert_detections_valid(detections)
 
+        print("self.bsz_images:", self.bsz_images)
         bsz_images = self.bsz_images
         coarse_model = self.coarse_model
         SO3_grid = self._SO3_grid
@@ -387,6 +448,8 @@ class PoseEstimator(torch.nn.Module):
             bbox_ids_ = torch.as_tensor(df_["bbox_id"].values, device=device)
 
             images_ = observation.images[batch_im_ids_]
+            print("images_.shape:", images_.shape)
+            print("batch_im_ids_:", batch_im_ids_)
             K_ = observation.K[batch_im_ids_]
 
             # We are indexing into the original detections TensorCollection.
@@ -396,11 +459,17 @@ class PoseEstimator(torch.nn.Module):
             # [b,N,3]
             points_ = meshes_.points
 
+            # print("points.shape:", points_.shape)
             # [b,3,3]
             SO3_grid_ = SO3_grid[m_idx]
+            # print("SO3_grid.shape", SO3_grid.shape)
+            # print("SO3_grid_.shape", SO3_grid_.shape)
 
+            # for g in range(len(SO3_grid_)):
+            #     print("SO3_grid_[g]:\n", SO3_grid_[g],'\n--')
             # Compute the initial poses
             # [b,4,4]
+            # hypotheses get initialized here 
             TCO_init_ = TCO_init_from_boxes_autodepth_with_R(
                 bboxes_,
                 points_,
@@ -410,6 +479,22 @@ class PoseEstimator(torch.nn.Module):
 
             del points_
 
+            # for g in range(len(TCO_init_)):
+
+                # print("TCO_init_[g]:\n", TCO_init_[g],'\n--')
+            
+            # input("line 432 in pose_estimator.py, press enter to continue...")
+            # print("m_idx", m_idx)
+            # print("images.shape:", images_.shape)
+
+            # sample_img = images_[m_idx].cpu().numpy().transpose(1,2,0)
+
+            # sample_img *= 255.0
+            # sample_img = cv2.cvtColor(sample_img, cv2.COLOR_RGB2BGR)
+
+            # cv2.imwrite("sample_img.png", sample_img)
+
+            # input("Press Enter to continue...")
             out_ = coarse_model.forward_coarse(
                 images=images_,
                 K=K_,
@@ -522,6 +607,8 @@ class PoseEstimator(torch.nn.Module):
         bsz_objects: Optional[int] = None,
         cuda_timer: bool = False,
         coarse_estimates: Optional[PoseEstimatesType] = None,
+        coarse_estimates_fp: Optional[str] = None,
+        use_coarse_estimates: bool = True,
     ) -> Tuple[PoseEstimatesType, dict]:
         """Runs the entire pose estimation pipeline.
 
@@ -545,13 +632,21 @@ class PoseEstimator(torch.nn.Module):
         timer = SimpleTimer()
         timer.start()
 
+        print("bsz_images:", bsz_images)
+        print("use_coarse_estimates:", use_coarse_estimates)
         if bsz_images is not None:
             self.bsz_images = bsz_images
 
         if bsz_objects is not None:
             self.bsz_objects = bsz_objects
 
+        if use_coarse_estimates and os.path.isfile(coarse_estimates_fp):
+            print("Loading coarse estimates from file:", coarse_estimates_fp)
+            with open(coarse_estimates_fp, "rb") as f:
+                coarse_estimates = pickle.load(f)
+
         if coarse_estimates is None:
+            print("coarse_estimates is None, running coarse model first.")
             assert detections is not None or run_detector, (
                 "You must " "either pass in `detections` or set run_detector=True"
             )
@@ -584,6 +679,13 @@ class PoseEstimator(torch.nn.Module):
             data_TCO_filtered = self.filter_pose_estimates(
                 data_TCO_coarse, top_K=n_pose_hypotheses, filter_field="coarse_logit"
             )
+            print("data_TCO_filtered:", data_TCO_filtered)
+
+            if coarse_estimates_fp is not None:
+                os.makedirs(os.path.dirname(coarse_estimates_fp), exist_ok=True)
+                # if save_coarse_estimates:
+                with open(coarse_estimates_fp, "wb") as f:
+                    pickle.dump(data_TCO_filtered, f)
         else:
             data_TCO_coarse = coarse_estimates
             coarse_extra_data = None
