@@ -146,6 +146,7 @@ class CameraData:
 
     @staticmethod
     def from_json(data_str: str) -> "CameraData":
+        print("data_str", data_str, os.path.isfile(data_str))
         d: DataJsonType = json.loads(data_str)
         assert isinstance(d, dict)
         data = CameraData()

@@ -6,7 +6,7 @@
             "source.organizeImports": true
         }
     },
-    "python.linting.enabled": true,
+    "python.linting.enabled": false,
     "python.linting.flake8Enabled": true,
     "python.linting.mypyEnabled": true,
 }

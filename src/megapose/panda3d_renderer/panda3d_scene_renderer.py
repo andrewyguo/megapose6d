@@ -15,7 +15,6 @@ limitations under the License.
 """
 
 
-
 # Standard Library
 import builtins
 import os
@@ -23,19 +22,24 @@ import subprocess
 import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from typing import Dict, List, Set
 from dataclasses import dataclass
 from functools import partial
 from typing import Dict, List, Optional, Set
 
 # Third Party
+import cv2
 import numpy as np
 import panda3d as p3d
 from direct.showbase.ShowBase import ShowBase
 from tqdm import tqdm
 
+import json 
+import transforms3d 
+import pyrr 
+
 # MegaPose
 from megapose.datasets.object_dataset import RigidObjectDataset
+from megapose.utils.resources import get_cuda_memory, get_gpu_memory, get_total_memory
 
 # Local Folder
 from .types import (
@@ -49,6 +53,24 @@ from .types import (
 )
 from .utils import make_rgb_texture_normal_map, np_to_lmatrix4
 
+# ngp 
+import sys 
+sys.path.append("/instant-ngp/build")
+sys.path.append("/home/andrewg/instant-ngp/build")
+try:
+    import pyngp as ngp  # noqa
+except Exception as e:
+    print(e)
+import cv2 
+import os 
+import imageio 
+
+rotate_y_neg_90 = np.array([
+    [0, 0, -1, 0],
+    [0, 1, 0, 0],
+    [1, 0, 0, 0],
+    [0, 0, 0, 1],
+])
 
 @dataclass
 class Panda3dDebugData:
@@ -58,7 +80,7 @@ class Panda3dDebugData:
 class App(ShowBase):
     """Panda3d App."""
 
-    def __init__(self) -> None:
+    def __init__(self, use_ngp_renderer: bool=True) -> None:
         p3d.core.load_prc_file_data(
             __file__,
             "load-display pandagl\n"
@@ -100,6 +122,29 @@ class App(ShowBase):
         self.render.set_antialias(p3d.core.AntialiasAttrib.MAuto)
         self.render.set_two_sided(True)
 
+        self.testbed = None  
+        if use_ngp_renderer:
+            try:
+                self.setup_testbed()
+                pass 
+            except Exception as e: 
+                print(e)
+            
+    def setup_testbed(self):
+        print("setup_testbed in App()")
+        self.testbed = ngp.Testbed()
+        self.testbed.load_snapshot("/megapose/data/hammers_models_nerf/handal_dataset_raw/handal_dataset_hammers/models_nerf/obj_000003.latents.ingp")
+
+        # self.testbed.exposure = ...
+        self.testbed.background_color = [0.0, 0.0, 0.0, 1.0]
+
+        self.testbed.fov_axis = 0
+        self.testbed.shall_train = False 
+        self.testbed.exposure = 0.0
+        self.testbed.nerf.sharpen = float(0)
+        self.testbed.nerf.render_with_lens_distortion = True
+        self.testbed.fov_axis = 0
+        self.testbed.fov = 1.0819319066613973 * 180 / np.pi
 
 def make_scene_lights(
     ambient_light_color: RgbaColor = (0.1, 0.1, 0.1, 1.0),
@@ -148,6 +193,7 @@ class Panda3dSceneRenderer:
         preload_labels: Set[str] = set(),
         debug: bool = False,
         verbose: bool = False,
+        use_ngp_renderer: bool = True,
     ):
 
         self._asset_dataset = asset_dataset
@@ -160,7 +206,7 @@ class Panda3dSceneRenderer:
         if hasattr(builtins, "base"):
             self._app = builtins.base  # type: ignore
         else:
-            self._app = App()
+            self._app = App(use_ngp_renderer=use_ngp_renderer)
         self._app.cam.node().setActive(0)
         self._app.render.clear_light()
         self._rgb_texture = make_rgb_texture_normal_map(size=32)
@@ -169,11 +215,31 @@ class Panda3dSceneRenderer:
         for label in tqdm(preload_labels, disable=not verbose):
             self.get_object_node(label)
 
+        try:
+            with open("/megapose/data/test_out/transforms.json", "w") as f:
+                json.dump({"frames":[]}, f)
+        except Exception as e:
+            print(e)    
+        self.count = 0 
+
     def create_new_camera(self, resolution: Resolution) -> Panda3dCamera:
         idx = sum([len(x) for x in self._cameras_pool.values()])
         cam = Panda3dCamera.create(f"camera={idx}", resolution=resolution, app=self._app)
         self._cameras_pool[resolution].append(cam)
         return cam
+
+    def visii_camera_frame_to_rdf(self, T_world_Cv):
+        """Rotates the camera frame to "right-down-forward" frame
+        Returns:
+            T_world_camera: 4x4 numpy array in "right-down-forward" coordinates
+        """
+        # C = camera frame (right-down-forward)
+        # Cv = visii camera frame (right-up-back)
+        T_Cv_C = np.eye(4)
+        T_Cv_C[:3, :3] = transforms3d.euler.euler2mat(np.pi, 0, 0)
+        T_world_C = T_world_Cv @ T_Cv_C
+        return T_world_C
+
 
     def get_cameras(self, data_cameras: List[Panda3dCameraData]) -> List[Panda3dCamera]:
         resolution_to_data_cameras: Dict[Resolution, List[Panda3dCameraData]] = defaultdict(list)
@@ -226,6 +292,8 @@ class Panda3dSceneRenderer:
             if data_obj.remove_mesh_material:
                 obj_node.setMaterialOff(1)
             TWO = np_to_lmatrix4(data_obj.TWO.toHomogeneousMatrix())
+            # print("data_obj", data_obj)
+            # print("TWO", TWO)
             obj_node.setMat(TWO)
             if data_obj.positioning_function is not None:
                 data_obj.positioning_function(root_node, obj_node)
@@ -246,7 +314,9 @@ class Panda3dSceneRenderer:
             camera_node_path.reparentTo(root_node)
 
             data_camera.set_lens_parameters(camera_node_path.node().getLens())
-            view_mat = data_camera.compute_view_mat()
+            view_mat, _ = data_camera.compute_view_mat()
+            # print("view_mat", view_mat)
+            # print("data_camera", data_camera)
             camera_node_path.setMat(view_mat)
             if data_camera.positioning_function is not None:
                 data_camera.positioning_function(root_node, camera_node_path)
@@ -262,6 +332,12 @@ class Panda3dSceneRenderer:
         renderings = []
         for camera in cameras:
             rgb = camera.get_rgb_image()
+            i = 0
+            # use cv2 to show rgb image
+            # while os.path.exists(f"/megapose/data/test_out/rgb_{str(i).zfill(3)}.png"):
+            #     i += 1
+            # cv2.imwrite(f"/megapose/data/test_out/rgb_{str(i).zfill(3)}.png", rgb)
+            # i += 1
             if copy_arrays:
                 rgb = rgb.copy()
             rendering = CameraRenderingData(rgb)
@@ -308,51 +384,132 @@ class Panda3dSceneRenderer:
     ) -> List[CameraRenderingData]:
 
         start = time.time()
-        root_node = self._app.render.attachNewNode("world")
-        object_nodes = self.setup_scene(root_node, object_datas)
-        cameras = self.setup_cameras(root_node, camera_datas)
-        light_nodes = self.setup_lights(root_node, light_datas)
-        setup_time = time.time() - start
+        if self._app.testbed is None:
+            root_node = self._app.render.attachNewNode("world")
+            object_nodes = self.setup_scene(root_node, object_datas)
+            cameras = self.setup_cameras(root_node, camera_datas)
+            light_nodes = self.setup_lights(root_node, light_datas)
+            setup_time = time.time() - start
 
-        start = time.time()
-        renderings = self.render_images(cameras, copy_arrays=copy_arrays, render_depth=render_depth)
-        if render_normals:
-            for object_node in object_nodes:
-                self.use_normals_texture(object_node)
+            start = time.time()
+            renderings = self.render_images(cameras, copy_arrays=copy_arrays, render_depth=render_depth)
+            if render_normals:
+                for object_node in object_nodes:
+                    self.use_normals_texture(object_node)
+                    root_node.clear_light()
+                    light_data = Panda3dLightData(light_type="ambient", color=(1.0, 1.0, 1.0, 1.0))
+                    light_nodes += self.setup_lights(root_node, [light_data])
+                normals_renderings = self.render_images(cameras, copy_arrays=copy_arrays)
+                for n, rendering in enumerate(renderings):
+                    rendering.normals = normals_renderings[n].rgb
+
+                    print("rendering within pandas3d renderer", self.count)
+                    os.makedirs("/megapose/data/test_out_pandas3d", exist_ok=True)            
+                    cv2.imwrite(f"/megapose/data/test_out_pandas3d/normals_{str(self.count).zfill(3)}.png", cv2.cvtColor(rendering.normals, cv2.COLOR_RGB2BGR))
+                    cv2.imwrite(f"/megapose/data/test_out_pandas3d/rgb_{str(self.count).zfill(3)}.png", cv2.cvtColor(rendering.rgb, cv2.COLOR_RGB2BGR))
+                    self.count += 1 
+
+            if render_binary_mask:
+                for rendering_n in renderings:
+                    assert rendering_n.depth is not None
+                    h, w = rendering_n.depth.shape[:2]
+                    binary_mask = np.zeros((h, w), dtype=np.bool_)
+                    binary_mask[rendering_n.depth[..., 0] > 0] = 1
+                    rendering.binary_mask = binary_mask
+
+            render_time = time.time() - start
+
+            if clear:
+                for camera in cameras:
+                    camera.node_path.node().setActive(0)
+                for object_node in object_nodes:
+                    object_node.clear_texture()  # TODO: Is this necessary ?
+                    object_node.clear_light()  # TODO: Is this necessary ?
+                    object_node.detach_node()
+                for light_node in light_nodes:
+                    light_node.detach_node()
                 root_node.clear_light()
-                light_data = Panda3dLightData(light_type="ambient", color=(1.0, 1.0, 1.0, 1.0))
-                light_nodes += self.setup_lights(root_node, [light_data])
-            normals_renderings = self.render_images(cameras, copy_arrays=copy_arrays)
-            for n, rendering in enumerate(renderings):
-                rendering.normals = normals_renderings[n].rgb
+                root_node.detach_node()
 
-        if render_binary_mask:
-            for rendering_n in renderings:
-                assert rendering_n.depth is not None
-                h, w = rendering_n.depth.shape[:2]
-                binary_mask = np.zeros((h, w), dtype=np.bool_)
-                binary_mask[rendering_n.depth[..., 0] > 0] = 1
-                rendering.binary_mask = binary_mask
+                for _ in range(3):
+                    # TODO: Is this necessary ?
+                    p3d.core.RenderState.garbageCollect()
+                    p3d.core.TransformState.garbageCollect()
 
-        render_time = time.time() - start
+        if self._app.testbed: 
+            print("Using NGP Renderer")
+            renderings = []
+            setup_time = time.time() - start
 
-        if clear:
-            for camera in cameras:
-                camera.node_path.node().setActive(0)
-            for object_node in object_nodes:
-                object_node.clear_texture()  # TODO: Is this necessary ?
-                object_node.clear_light()  # TODO: Is this necessary ?
-                object_node.detach_node()
-            for light_node in light_nodes:
-                light_node.detach_node()
-            root_node.clear_light()
-            root_node.detach_node()
+            for camera_data in camera_datas:
+                # print("camera_data.TCO \n", camera_data.TCO)
 
-            for _ in range(3):
-                # TODO: Is this necessary ?
-                p3d.core.RenderState.garbageCollect()
-                p3d.core.TransformState.garbageCollect()
+                c2m_transform = np.linalg.inv(camera_data.TCO)
+
+                # print("c2m_transform\n", c2m_transform)
+
+                cam_extrincs = self.visii_camera_frame_to_rdf(c2m_transform)
+
+                # Orient gravity down 
+                cam_extrincs = rotate_y_neg_90 @ cam_extrincs 
+
+                # print("cam_extrincs after rotate_y_neg_90 \n", cam_extrincs)
+
+                self._app.testbed.set_nerf_camera_matrix(np.matrix(cam_extrincs)[:-1,:])
+
+                start = time.time()
+                self._app.testbed.render_mode = ngp.RenderMode.Shade 
+                rgb = self._app.testbed.render(320, 240, 16, True)
+
+                render_time = time.time() - start
+                render = CameraRenderingData(post_process_ngp_render(rgb)) 
+
+                if render_normals:
+                    self._app.testbed.render_mode = ngp.RenderMode.Normals 
+                    normals = self._app.testbed.render(320, 240, 16, True)   
+                    
+                    render.normals = post_process_ngp_render(normals)
+
+                renderings.append(render)
+
+                try:
+                    os.makedirs("/megapose/data/test_out", exist_ok=True)
+                    if self.count % 1 == 0:
+                        cv2.imwrite(f"/megapose/data/test_out/ngp_rgb_{str(self.count).zfill(3)}.png", cv2.cvtColor(post_process_ngp_render(rgb), cv2.COLOR_RGB2BGR))
+                        
+                        if render_normals:
+                            cv2.imwrite(f"/megapose/data/test_out/ngp_normals_{str(self.count - 1).zfill(3)}.png", cv2.cvtColor(render.normals, cv2.COLOR_RGB2BGR)) 
+                        self.count += 1
+
+                    with open(f"/megapose/data/test_out/transforms.json", "r") as f:
+                        transforms_json = json.load(f)
+
+                    transforms_json["frames"].append({"file_path": str(self.count).zfill(6), "transform_matrix": cam_extrincs.tolist()})
+
+                    with open(f"/megapose/data/test_out/transforms.json", "w") as f:
+                        json.dump(transforms_json, f, indent=2)
+                except Exception as e:
+                    print(e)
+
+                # input("Press Enter to continue...")
+                # Save Camera Extrinsics 
 
         self.debug_data.timings["setup_time"] = setup_time
         self.debug_data.timings["render_time"] = render_time
         return renderings
+    
+    
+def post_process_ngp_render(ngp_render):
+    def linear_to_srgb(img):
+        limit = 0.0031308
+        return np.where(img > limit, 1.055 * (img ** (1.0 / 2.4)) - 0.055, 12.92 * img)
+    
+    ngp_render = np.copy(ngp_render)
+    ngp_render[...,0:3] = np.divide(ngp_render[...,0:3], ngp_render[...,3:4], out=np.zeros_like(ngp_render[...,0:3]), where=ngp_render[...,3:4] != 0)
+    ngp_render[...,0:3] = linear_to_srgb(ngp_render[...,0:3])
+
+    ngp_render = (np.clip(ngp_render, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+    ngp_render = cv2.cvtColor(ngp_render, cv2.COLOR_RGBA2RGB)
+
+    return ngp_render

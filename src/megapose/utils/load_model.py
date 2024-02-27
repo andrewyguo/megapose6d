@@ -52,6 +52,7 @@ def load_named_model(
     object_dataset: RigidObjectDataset,
     n_workers: int = 4,
     bsz_images: int = 128,
+    use_ngp_renderer: bool = True,
 ) -> PoseEstimator:
 
     model = NAMED_MODELS[model_name]
@@ -69,6 +70,7 @@ def load_named_model(
         force_panda3d_renderer=True,
         renderer_kwargs=renderer_kwargs,
         models_root=LOCAL_DATA_DIR / "megapose-models",
+        use_ngp_renderer=use_ngp_renderer,
     )
 
     depth_refiner = None

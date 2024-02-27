@@ -64,13 +64,14 @@ class Panda3dCameraData:
     z_far: float = 10
     node_name: str = "camera"
     positioning_function: Optional[NodeFunction] = None
+    TCO: np.ndarray = np.eye(4)
 
     def compute_view_mat(self) -> p3d.core.LMatrix4f:
         assert self.TWC is not None
         TWCGL = self.TWC * TCCGL
         view_mat = TWCGL.toHomogeneousMatrix()
-        view_mat = p3d.core.LMatrix4f(*view_mat.transpose().flatten().tolist())
-        return view_mat
+        view_mat_p3d_matrix = p3d.core.LMatrix4f(*view_mat.transpose().flatten().tolist())
+        return view_mat_p3d_matrix, view_mat
 
     def set_lens_parameters(self, lens: p3d.core.Lens) -> p3d.core.Lens:
         # NOTE: inspired from http://ksimek.github.io/2013/06/03/calibrated_cameras_in_opengl/
